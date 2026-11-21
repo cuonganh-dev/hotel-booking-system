@@ -1,3 +1,4 @@
+#Sinh viên thực hiện: Phạm Mạnh Cường - Lớp 75DCHT21
 # Hệ Thống Quản Lý Đặt Phòng Khách Sạn (Hotel Booking Management System)
 
 Đồ án môn học **Cơ sở dữ liệu** xây dựng hệ thống quản lý đặt phòng khách sạn hoàn chỉnh, ứng dụng các kỹ thuật quản trị CSDL nâng cao trên **PostgreSQL 19** kết hợp Backend **Flask** và giao diện **Streamlit**.
