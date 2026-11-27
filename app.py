@@ -1,8 +1,34 @@
+import json
+import time
+import redis
 from flask import Flask, request, jsonify
 from psycopg2 import errors
 from db import get_db_connection
 
 app = Flask(__name__)
+
+# --- KẾT NỐI REDIS CACHE ---
+try:
+    redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+    redis_client.ping()
+    print("✅ [REDIS] Kết nối Redis Cache thành công (localhost:6379)")
+except Exception as e:
+    redis_client = None
+    print(f"⚠️ [REDIS] Không thể kết nối Redis, hệ thống sẽ chạy trực tiếp qua PostgreSQL: {e}")
+
+
+def clear_rooms_cache():
+    """Xóa toàn bộ cache danh sách phòng trống khi có thay đổi đặt/hủy phòng (Cache Invalidation)"""
+    if not redis_client:
+        return
+    try:
+        keys = redis_client.keys("available_rooms:*")
+        if keys:
+            redis_client.delete(*keys)
+            print(f"🧹 [REDIS INVALIDATION] Đã xóa {len(keys)} key cache phòng trống do dữ liệu thay đổi.")
+    except Exception as e:
+        print(f"⚠️ [REDIS] Lỗi xóa cache: {e}")
+
 
 # 1. API CORE: Đặt phòng (Tự tính tiền bằng SQL + Chống trùng bằng Exclusion Constraint)
 @app.route('/api/bookings', methods=['POST'])
@@ -23,7 +49,6 @@ def create_booking():
             return jsonify({"error": "Lỗi kết nối Database"}), 500
             
         cur = conn.cursor()
-        # Tự động tính tổng tiền = số đêm * giá phòng trong DB
         sql = """
             INSERT INTO bookings (user_id, room_id, stay_dates, total_price, status) 
             SELECT %s, r.id, daterange(%s, %s, '[)'), 
@@ -43,6 +68,9 @@ def create_booking():
         new_id, calculated_price = result[0], float(result[1])
         conn.commit()
         cur.close()
+
+        # Xóa cache phòng trống vì vừa có phòng được đặt
+        clear_rooms_cache()
         
         return jsonify({
             "message": "Đặt phòng thành công!",
@@ -74,7 +102,7 @@ def create_booking():
             conn.close()
 
 
-# 2. API Tìm phòng trống theo ngày (Để Hiền lắp vào giao diện tìm phòng trên Streamlit)
+# 2. API Tìm phòng trống theo ngày (Áp dụng Redis Cache-Aside + TTL 60s)
 @app.route('/api/rooms/available', methods=['GET'])
 def get_available_rooms():
     check_in = request.args.get('check_in')
@@ -83,6 +111,25 @@ def get_available_rooms():
     if not check_in or not check_out:
         return jsonify({"error": "Thiếu tham số check_in hoặc check_out"}), 400
 
+    start_time = time.perf_counter()
+    cache_key = f"available_rooms:{check_in}:{check_out}"
+
+    # BƯỚC 1: Kiểm tra trong Redis Cache trước (CACHE HIT)
+    if redis_client:
+        try:
+            cached_data = redis_client.get(cache_key)
+            if cached_data:
+                elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+                print(f"⚡ [CACHE HIT] Lấy từ Redis ({cache_key}) - Thời gian: {elapsed_ms} ms")
+                return jsonify({
+                    "source": "Redis Cache (CACHE HIT)",
+                    "response_time_ms": elapsed_ms,
+                    "data": json.loads(cached_data)
+                }), 200
+        except Exception as e:
+            print(f"⚠️ [REDIS] Lỗi đọc cache: {e}")
+
+    # BƯỚC 2: Không có trong Redis -> Truy vấn PostgreSQL (CACHE MISS)
     conn = None
     try:
         conn = get_db_connection()
@@ -111,7 +158,22 @@ def get_available_rooms():
                 "price_per_night": float(r[4])
             } for r in rows
         ]
-        return jsonify({"data": rooms}), 200
+
+        # BƯỚC 3: Lưu kết quả vào Redis với thời gian hết hạn TTL = 60 giây
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, 60, json.dumps(rooms))
+            except Exception as e:
+                print(f"⚠️ [REDIS] Lỗi ghi cache: {e}")
+
+        elapsed_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        print(f"🐢 [CACHE MISS] Truy vấn PostgreSQL ({cache_key}) - Thời gian: {elapsed_ms} ms")
+
+        return jsonify({
+            "source": "PostgreSQL (CACHE MISS)",
+            "response_time_ms": elapsed_ms,
+            "data": rooms
+        }), 200
     except Exception as e:
         return jsonify({"error": f"Lỗi hệ thống: {str(e)}"}), 500
     finally:
@@ -144,6 +206,10 @@ def update_booking_status(booking_id):
 
         conn.commit()
         cur.close()
+
+        # Xóa cache phòng trống vì trạng thái đơn vừa thay đổi (đặc biệt khi hủy phòng để nhả lịch)
+        clear_rooms_cache()
+
         return jsonify({"message": f"Đã cập nhật đơn #{booking_id} sang {new_status}"}), 200
     except errors.ExclusionViolation:
         if conn:
@@ -153,7 +219,8 @@ def update_booking_status(booking_id):
         if conn:
             conn.close()
 
-    # 4. API Đăng nhập & Kiểm tra phân quyền (Role)
+
+# 4. API Đăng nhập & Kiểm tra phân quyền (Role)
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.get_json()
@@ -191,5 +258,7 @@ def login():
     finally:
         if conn:
             conn.close()
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000, threaded=True)

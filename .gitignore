@@ -1,3 +1,6 @@
 venv/
 __pycache__/
 *.pyc
+Redis-x64-5.0.14.1.zip
+Redis-x64-5.0.14.1/
+hotel-booking-system/

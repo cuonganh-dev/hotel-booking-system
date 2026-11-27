@@ -41,15 +41,17 @@ with st.sidebar:
     st.title("Grand Hotel")
     if st.session_state.user is None:
         st.subheader("🔐 Đăng nhập hệ thống")
-        email = st.text_input("Email", placeholder="Nhập email của bạn...")
-        password = st.text_input("Mật khẩu", type="password", placeholder="Nhập mật khẩu...")
-        if st.button("Đăng nhập", type="primary", use_container_width=True):
-            res = requests.post("http://127.0.0.1:5000/api/login", json={"email": email, "password": password})
-            if res.status_code == 200:
-                st.session_state.user = res.json()["user"]
-                st.rerun()
-            else:
-                st.error(res.json().get("error", "Sai email hoặc mật khẩu!"))
+        with st.form("login_form"):
+            email = st.text_input("Email", placeholder="Nhập email của bạn...")
+            password = st.text_input("Mật khẩu", type="password", placeholder="Nhập mật khẩu...")
+            submitted = st.form_submit_button("Đăng nhập", type="primary", use_container_width=True)
+            if submitted:
+                res = requests.post("http://127.0.0.1:5000/api/login", json={"email": email, "password": password})
+                if res.status_code == 200:
+                    st.session_state.user = res.json()["user"]
+                    st.rerun()
+                else:
+                    st.error(res.json().get("error", "Sai email hoặc mật khẩu!"))
     else:
         u = st.session_state.user
         st.success(f"👤 **{u['full_name']}**")
